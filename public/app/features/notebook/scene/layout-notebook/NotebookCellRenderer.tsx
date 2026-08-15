@@ -1,4 +1,5 @@
 import { css } from '@emotion/css';
+import { useCallback } from 'react';
 
 import { type GrafanaTheme2 } from '@grafana/data';
 import { type VizPanel } from '@grafana/scenes';
@@ -20,11 +21,15 @@ export function NotebookCellRenderer({
   isEditing,
   autoFocus,
   onContentChange,
+  onContentEditStart,
+  onContentEditEnd,
 }: {
   cell: NotebookCellItem;
   isEditing: boolean;
   autoFocus?: boolean;
   onContentChange: (cell: NotebookCellItem, content: CellContentKind) => void;
+  onContentEditStart?: (cell: NotebookCellItem) => void;
+  onContentEditEnd?: (cell: NotebookCellItem) => void;
 }) {
   const { body: panel, content: narrative, collapsed, elementName } = cell.useState();
 
@@ -44,6 +49,8 @@ export function NotebookCellRenderer({
         isEditing={isEditing}
         autoFocus={autoFocus}
         onContentChange={onContentChange}
+        onContentEditStart={onContentEditStart}
+        onContentEditEnd={onContentEditEnd}
       />
     );
   }
@@ -74,14 +81,20 @@ function NarrativeCell({
   isEditing,
   autoFocus,
   onContentChange,
+  onContentEditStart,
+  onContentEditEnd,
 }: {
   cell: NotebookCellItem;
   content: CellContentKind;
   isEditing: boolean;
   autoFocus?: boolean;
   onContentChange: (cell: NotebookCellItem, content: CellContentKind) => void;
+  onContentEditStart?: (cell: NotebookCellItem) => void;
+  onContentEditEnd?: (cell: NotebookCellItem) => void;
 }) {
   const styles = useStyles2(getStyles);
+  const handleEditStart = useCallback(() => onContentEditStart?.(cell), [cell, onContentEditStart]);
+  const handleEditEnd = useCallback(() => onContentEditEnd?.(cell), [cell, onContentEditEnd]);
 
   const registered = cellTypeRegistry.getIfExists(content.kind);
   if (!registered) {
@@ -96,6 +109,8 @@ function NarrativeCell({
         isEditing={isEditing}
         autoFocus={autoFocus}
         onChange={(updated) => onContentChange(cell, updated)}
+        onEditStart={handleEditStart}
+        onEditEnd={handleEditEnd}
       />
     </div>
   );

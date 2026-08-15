@@ -62,6 +62,8 @@ interface Props {
    * to.
    */
   onContentChange: (cell: NotebookCellItem, content: CellContentKind) => void;
+  onContentEditStart?: (cell: NotebookCellItem) => void;
+  onContentEditEnd?: (cell: NotebookCellItem) => void;
 }
 
 /**
@@ -80,6 +82,8 @@ export function NotebookCellFrame({
   onDuplicate,
   onDelete,
   onContentChange,
+  onContentEditStart,
+  onContentEditEnd,
 }: Props) {
   const styles = useStyles2(getStyles);
 
@@ -123,6 +127,8 @@ export function NotebookCellFrame({
             isEditing={Boolean(isEditing)}
             autoFocus={autoFocus}
             onContentChange={onContentChange}
+            onContentEditStart={onContentEditStart}
+            onContentEditEnd={onContentEditEnd}
           />
 
           {/* index + 1: this divider inserts *after* the cell it belongs to. */}
