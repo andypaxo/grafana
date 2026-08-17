@@ -1,5 +1,13 @@
 import { api } from './baseAPI';
-export const addTagTypes = ['API Discovery', 'Display', 'Search', 'ServiceAccount', 'Team', 'User'] as const;
+export const addTagTypes = [
+  'API Discovery',
+  'Display',
+  'Search',
+  'ServiceAccount',
+  'Team',
+  'UserActions',
+  'User',
+] as const;
 const injectedRtkApi = api
   .enhanceEndpoints({
     addTagTypes,
@@ -300,6 +308,10 @@ const injectedRtkApi = api
       createTeamRemovemember: build.mutation<CreateTeamRemovememberApiResponse, CreateTeamRemovememberApiArg>({
         query: (queryArg) => ({ url: `/teams/${queryArg.name}/removemember`, method: 'POST' }),
         invalidatesTags: ['Team'],
+      }),
+      getUserActions: build.query<GetUserActionsApiResponse, GetUserActionsApiArg>({
+        query: () => ({ url: `/userActions` }),
+        providesTags: ['UserActions'],
       }),
       listUser: build.query<ListUserApiResponse, ListUserApiArg>({
         query: (queryArg) => ({
@@ -752,6 +764,10 @@ export type CreateTeamRemovememberApiArg = {
   /** name of the TeamMemberList */
   name: string;
 };
+export type GetUserActionsApiResponse = /** status 200 Map of RBAC action to true */ {
+  [key: string]: boolean;
+};
+export type GetUserActionsApiArg = void;
 export type ListUserApiResponse = /** status 200 OK */ UserList;
 export type ListUserApiArg = {
   /** If 'true', then the output is pretty printed. Defaults to 'false' unless the user-agent indicates a browser or command-line HTTP tool (curl and wget). */
@@ -1292,6 +1308,8 @@ export const {
   useGetTeamMembersQuery,
   useLazyGetTeamMembersQuery,
   useCreateTeamRemovememberMutation,
+  useGetUserActionsQuery,
+  useLazyGetUserActionsQuery,
   useListUserQuery,
   useLazyListUserQuery,
   useCreateUserMutation,
