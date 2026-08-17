@@ -31,9 +31,9 @@ const (
 //
 // All node types are modelled so the schema is future-proof, but v1 only
 // accepts a narrow subset (top-level single leaf or a single and of leaves;
-// text and filter leaves; In/NotIn filter operators). Everything else is
-// rejected with 422 Unprocessable Entity by the validation layer. range and
-// exists are sketched for future versions and always rejected today.
+// text, filter and range leaves; In/NotIn filter operators). Everything else is
+// rejected with 422 Unprocessable Entity by the validation layer. exists is
+// sketched for a future version and always rejected today.
 //
 // +k8s:deepcopy-gen=true
 type WhereNode struct {
@@ -45,7 +45,7 @@ type WhereNode struct {
 	// Leaves.
 	Text   *TextPredicate   `json:"text,omitempty"`
 	Filter *FilterPredicate `json:"filter,omitempty"`
-	Range  *RangePredicate  `json:"range,omitempty"`  // future, rejected in v1
+	Range  *RangePredicate  `json:"range,omitempty"`
 	Exists *ExistsPredicate `json:"exists,omitempty"` // future, rejected in v1
 }
 
@@ -62,6 +62,8 @@ type TextPredicate struct {
 }
 
 // FilterPredicate is an exact / set-based predicate against a single field.
+// Values are strings whatever the field's declared type, so a boolean field
+// takes "true" or "false" and a numeric field takes the number written out.
 //
 // +k8s:deepcopy-gen=true
 type FilterPredicate struct {
@@ -71,8 +73,10 @@ type FilterPredicate struct {
 	Values   []string `json:"values"`
 }
 
-// RangePredicate is a future numeric/date range predicate. Modelled for schema
-// stability; always rejected in v1.
+// RangePredicate compares a numeric field against one or two bounds. At least
+// one bound is required, gt cannot be combined with gte, and lt cannot be
+// combined with lte. Boolean and string fields are rejected: only numbers have
+// the order a range asks about. On an integer field a bound must be whole.
 //
 // +k8s:deepcopy-gen=true
 type RangePredicate struct {
