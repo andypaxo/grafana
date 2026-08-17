@@ -19,10 +19,10 @@ import (
 const RoutePath = "userActions"
 
 // Handler serves GET /apis/iam.grafana.app/v0alpha1/namespaces/{ns}/userActions:
-// the RBAC actions of the calling user derived from their basic role only, as
-// a map of action -> true. The response shape matches the legacy
-// /api/access-control/user/actions endpoint; per-user, team and managed
-// permission assignments are intentionally not included.
+// the RBAC actions granted to the calling user, as a map of action -> true.
+// The response matches the legacy /api/access-control/user/actions endpoint,
+// covering the caller's basic role as well as roles assigned to the user
+// directly and through its teams.
 type Handler struct {
 	provider RolePermissionProvider
 }
@@ -41,7 +41,7 @@ func (h *Handler) GetAPIRoutes(_ map[string]common.OpenAPIDefinition) *builder.A
 						OperationProps: spec3.OperationProps{
 							OperationId: "getUserActions", // This is used by RTK client generator
 							Tags:        []string{"UserActions"},
-							Description: "Returns the RBAC actions granted to the calling user by their basic role, as a map of action to true.",
+							Description: "Returns the RBAC actions granted to the calling user, as a map of action to true.",
 							Parameters: []*spec3.Parameter{
 								{
 									ParameterProps: spec3.ParameterProps{
