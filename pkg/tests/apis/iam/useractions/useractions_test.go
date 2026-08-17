@@ -16,7 +16,10 @@ func TestMain(m *testing.M) {
 	testsuite.Run(m)
 }
 
-const routePath = "/apis/iam.grafana.app/v0alpha1/namespaces/default/userActions"
+const (
+	routePath       = "/apis/iam.grafana.app/v0alpha1/namespaces/default/userActions"
+	legacyRoutePath = "/api/access-control/user/actions?reloadcache=true"
+)
 
 func TestIntegrationUserActions(t *testing.T) {
 	testutil.SkipIntegrationTestInShortMode(t)
@@ -41,8 +44,20 @@ func TestIntegrationUserActions(t *testing.T) {
 		return res
 	}
 
+	getLegacyActions := func(t *testing.T, user apis.User) map[string]bool {
+		t.Helper()
+		res := map[string]bool{}
+		rsp := apis.DoRequest(helper, apis.RequestParams{
+			User: user,
+			Path: legacyRoutePath,
+		}, &res)
+		require.Equal(t, 200, rsp.Response.StatusCode)
+		return res
+	}
+
 	t.Run("viewer gets read but not write actions", func(t *testing.T) {
 		actions := getUserActions(t, helper.Org1.Viewer)
+		require.True(t, actions["folders:read"])
 		require.True(t, actions["annotations:read"])
 		require.False(t, actions["dashboards:create"])
 		require.False(t, actions["teams:create"])
@@ -50,9 +65,8 @@ func TestIntegrationUserActions(t *testing.T) {
 
 	t.Run("editor gets editor actions", func(t *testing.T) {
 		actions := getUserActions(t, helper.Org1.Editor)
-		require.True(t, actions["annotations:read"])
 		require.True(t, actions["dashboards:create"])
-		require.True(t, actions["alert.instances:create"])
+		require.True(t, actions["folders:create"])
 		require.False(t, actions["teams:create"])
 	})
 
@@ -60,42 +74,30 @@ func TestIntegrationUserActions(t *testing.T) {
 		actions := getUserActions(t, helper.Org1.Admin)
 		require.True(t, actions["dashboards:create"])
 		require.True(t, actions["teams:create"])
+		require.True(t, actions["users:read"])
 	})
 
-	// The provider resolves permissions through GetUserPermissions with a
-	// synthetic role-only requester, which covers the same role-derived
-	// sources as the legacy endpoint (role registry, seeded builtin grants,
-	// shared-with-me) but intentionally omits per-user and team assignments.
-	// The viewer has neither, so the two endpoints must match exactly; admin
-	// and editor are members of the helper's Staff team, so for them the
-	// legacy response is a superset.
-	getLegacyActions := func(t *testing.T, user apis.User) map[string]bool {
-		t.Helper()
-		legacy := map[string]bool{}
-		rsp := apis.DoRequest(helper, apis.RequestParams{
-			User: user,
-			Path: "/api/access-control/user/actions",
-		}, &legacy)
-		require.Equal(t, 200, rsp.Response.StatusCode)
-		return legacy
-	}
-
-	t.Run("exact parity with legacy endpoint for a user without team or user assignments", func(t *testing.T) {
-		require.Equal(t, getLegacyActions(t, helper.Org1.Viewer), getUserActions(t, helper.Org1.Viewer))
+	// Editor is a member of the helper's Staff team, which carries a managed
+	// team permission. Viewer is not, so teams:read can only come from the
+	// team assignment.
+	t.Run("includes permissions granted through a team", func(t *testing.T) {
+		require.True(t, getUserActions(t, helper.Org1.Editor)["teams:read"])
+		require.False(t, getUserActions(t, helper.Org1.Viewer)["teams:read"])
 	})
 
-	t.Run("subset of legacy endpoint for team members", func(t *testing.T) {
+	// The endpoint must be a drop-in replacement for the legacy one, including
+	// permissions that come from team membership. The helper puts Admin and
+	// Editor in its Staff team, so those two exercise the team-derived path.
+	t.Run("matches the legacy endpoint exactly", func(t *testing.T) {
 		for name, user := range map[string]apis.User{
+			"viewer": helper.Org1.Viewer,
 			"editor": helper.Org1.Editor,
 			"admin":  helper.Org1.Admin,
 		} {
 			t.Run(name, func(t *testing.T) {
-				legacy := getLegacyActions(t, user)
 				actions := getUserActions(t, user)
 				require.NotEmpty(t, actions)
-				for action := range actions {
-					require.Contains(t, legacy, action)
-				}
+				require.Equal(t, getLegacyActions(t, user), actions)
 			})
 		}
 	})

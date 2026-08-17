@@ -6,148 +6,124 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	authnlib "github.com/grafana/authlib/authn"
+	claims "github.com/grafana/authlib/types"
+	k8srequest "k8s.io/apiserver/pkg/endpoints/request"
 
 	"github.com/grafana/grafana/pkg/apimachinery/identity"
+	"github.com/grafana/grafana/pkg/registry/apis/iam/legacy"
 	"github.com/grafana/grafana/pkg/services/accesscontrol"
-	"github.com/grafana/grafana/pkg/services/authn"
+	authzstore "github.com/grafana/grafana/pkg/services/authz/rbac/store"
 	"github.com/grafana/grafana/pkg/services/org"
 	"github.com/grafana/grafana/pkg/services/user"
 )
 
-type stubACService struct {
-	accesscontrol.Service
-	gotRequester identity.Requester
-	permissions  []accesscontrol.Permission
+// nsCtx mimics the apiserver, which puts the request's namespace in the context.
+func nsCtx(namespace string) context.Context {
+	return k8srequest.WithNamespace(context.Background(), namespace)
 }
 
-func (s *stubACService) GetUserPermissions(_ context.Context, requester identity.Requester, _ accesscontrol.Options) ([]accesscontrol.Permission, error) {
-	s.gotRequester = requester
-	return s.permissions, nil
+type fakeActionStore struct {
+	gotQuery ActionsQuery
+	gotNs    claims.NamespaceInfo
+	actions  []string
 }
 
-func TestUserPermissionsProvider_ActionsForUser(t *testing.T) {
-	stub := &stubACService{permissions: []accesscontrol.Permission{
-		{Action: "dashboards:read", Scope: "dashboards:*"},
-		{Action: "dashboards:write", Scope: "dashboards:*"},
-	}}
-	provider := NewUserPermissionsProvider(stub)
+func (f *fakeActionStore) GetUserActions(_ context.Context, ns claims.NamespaceInfo, q ActionsQuery) ([]string, error) {
+	f.gotNs, f.gotQuery = ns, q
+	return f.actions, nil
+}
 
-	caller := &user.SignedInUser{
-		UserID:         42,
-		OrgID:          3,
-		OrgRole:        org.RoleEditor,
-		IsGrafanaAdmin: true,
-		TeamIDs:        []int64{7},
+type fakeIdentifierStore struct {
+	ids  authzstore.UserIdentifiers
+	role authzstore.BasicRole
+}
+
+func (f *fakeIdentifierStore) GetUserIdentifiers(_ context.Context, _ authzstore.UserIdentifierQuery) (*authzstore.UserIdentifiers, error) {
+	return &f.ids, nil
+}
+
+func (f *fakeIdentifierStore) GetBasicRoles(_ context.Context, _ claims.NamespaceInfo, _ authzstore.BasicRoleQuery) (*authzstore.BasicRole, error) {
+	return &f.role, nil
+}
+
+// fakeIdentityStore returns teams one page at a time so the paging loop is exercised.
+type fakeIdentityStore struct {
+	pages [][]int64
+	calls int
+}
+
+func (f *fakeIdentityStore) ListUserTeams(_ context.Context, _ claims.NamespaceInfo, _ legacy.ListUserTeamsQuery) (*legacy.ListUserTeamsResult, error) {
+	page := f.pages[f.calls]
+	f.calls++
+	res := &legacy.ListUserTeamsResult{}
+	for _, id := range page {
+		res.Items = append(res.Items, legacy.UserTeam{ID: id})
 	}
+	if f.calls < len(f.pages) {
+		res.Continue = int64(f.calls)
+	}
+	return res, nil
+}
 
-	actions, err := provider.ActionsForUser(context.Background(), caller)
-	require.NoError(t, err)
-	require.Equal(t, map[string]bool{"dashboards:read": true, "dashboards:write": true}, actions)
+func TestSQLProvider_ActionsForUser(t *testing.T) {
+	t.Run("returns every granted action and passes the resolved identity to the store", func(t *testing.T) {
+		actions := &fakeActionStore{actions: []string{"dashboards:read", "teams:create", "users:read"}}
+		ids := &fakeIdentifierStore{
+			ids:  authzstore.UserIdentifiers{ID: 7, UID: "u7"},
+			role: authzstore.BasicRole{Role: "Editor", IsAdmin: true},
+		}
+		provider := NewSQLProvider(actions, ids, &fakeIdentityStore{pages: [][]int64{{1, 2}, {3}}}, nil)
 
-	t.Run("queries permissions with a synthetic role-only requester", func(t *testing.T) {
-		synthetic, ok := stub.gotRequester.(*user.SignedInUser)
-		require.True(t, ok)
-		require.Equal(t, int64(3), synthetic.OrgID)
-		require.Equal(t, org.RoleEditor, synthetic.OrgRole)
-		require.True(t, synthetic.IsGrafanaAdmin)
-		require.Zero(t, synthetic.UserID, "must not carry the user id, or per-user permissions would be included")
-		require.Empty(t, synthetic.GetTeams(), "must not carry teams, or team permissions would be included")
-		require.False(t, synthetic.HasUniqueId(), "must stay on the uncached permission path")
+		got, err := provider.ActionsForUser(nsCtx("default"), &user.SignedInUser{
+			OrgID: 1, UserID: 7, UserUID: "u7", OrgRole: org.RoleEditor,
+		})
+		require.NoError(t, err)
+		require.Equal(t, map[string]bool{"dashboards:read": true, "teams:create": true, "users:read": true}, got)
+
+		require.Equal(t, int64(7), actions.gotQuery.UserID)
+		require.Equal(t, "Editor", actions.gotQuery.Role)
+		require.True(t, actions.gotQuery.IsServerAdmin)
+		require.Equal(t, []int64{1, 2, 3}, actions.gotQuery.TeamIDs, "must collect every page of teams")
+		require.Equal(t, int64(1), actions.gotNs.OrgID)
+	})
+
+	t.Run("expands action sets when a resolver is configured", func(t *testing.T) {
+		actions := &fakeActionStore{actions: []string{"folders:edit"}}
+		provider := NewSQLProvider(actions, &fakeIdentifierStore{}, &fakeIdentityStore{pages: [][]int64{nil}}, expandFolderEdit{})
+
+		got, err := provider.ActionsForUser(nsCtx("default"), &user.SignedInUser{OrgID: 1, UserID: 1, UserUID: "u1"})
+		require.NoError(t, err)
+		require.Equal(t, map[string]bool{"folders:read": true, "dashboards:read": true}, got)
+	})
+
+	t.Run("identities without RBAC assignments get an empty set", func(t *testing.T) {
+		actions := &fakeActionStore{actions: []string{"should:not:be:read"}}
+		provider := NewSQLProvider(actions, &fakeIdentifierStore{}, &fakeIdentityStore{}, nil)
+
+		// An access policy identity is neither a user nor a service account.
+		got, err := provider.ActionsForUser(nsCtx("default"), &identity.StaticRequester{
+			Type: claims.TypeAccessPolicy, OrgID: 1,
+		})
+		require.NoError(t, err)
+		require.Empty(t, got)
 	})
 }
 
-func mtIdentity(role string) *authn.Identity {
-	if role == "" {
-		return &authn.Identity{}
+// expandFolderEdit stands in for the action set service: it turns the
+// folders:edit action set into the actions it represents.
+type expandFolderEdit struct{ accesscontrol.ActionResolver }
+
+func (expandFolderEdit) ExpandActionSets(permissions []accesscontrol.Permission) []accesscontrol.Permission {
+	var out []accesscontrol.Permission
+	for _, p := range permissions {
+		if p.Action == "folders:edit" {
+			out = append(out,
+				accesscontrol.Permission{Action: "folders:read"},
+				accesscontrol.Permission{Action: "dashboards:read"},
+			)
+			continue
+		}
+		out = append(out, p)
 	}
-	return &authn.Identity{
-		IDTokenClaims: &authnlib.Claims[authnlib.IDTokenClaims]{
-			Rest: authnlib.IDTokenClaims{Role: role},
-		},
-	}
-}
-
-func TestRegistrationsProvider_ActionsForUser(t *testing.T) {
-	provider := NewRegistrationsProvider([]accesscontrol.RoleRegistration{
-		{
-			Role: accesscontrol.RoleDTO{
-				Name: "fixed:dashboards:reader",
-				Permissions: []accesscontrol.Permission{
-					{Action: "dashboards:read", Scope: "dashboards:*"},
-				},
-			},
-			Grants: []string{"Viewer"},
-		},
-		{
-			Role: accesscontrol.RoleDTO{
-				Name: "fixed:dashboards:writer",
-				Permissions: []accesscontrol.Permission{
-					{Action: "dashboards:write", Scope: "dashboards:*"},
-				},
-			},
-			Grants: []string{"Editor"},
-		},
-		{
-			Role: accesscontrol.RoleDTO{
-				Name: "fixed:users:writer",
-				Permissions: []accesscontrol.Permission{
-					{Action: "users:write"},
-				},
-			},
-			Grants: []string{"Grafana Admin"},
-		},
-		{
-			Role: accesscontrol.RoleDTO{
-				Name: "fixed:excluded:reader",
-				Permissions: []accesscontrol.Permission{
-					{Action: "excluded:read"},
-				},
-			},
-			Grants:  []string{"Viewer"},
-			Exclude: []string{"Editor"},
-		},
-	})
-
-	ctx := context.Background()
-
-	t.Run("viewer grant is expanded to parent roles", func(t *testing.T) {
-		actions, err := provider.ActionsForUser(ctx, mtIdentity("Admin"))
-		require.NoError(t, err)
-		require.True(t, actions["dashboards:read"], "viewer grant should reach Admin")
-		require.True(t, actions["dashboards:write"], "editor grant should reach Admin")
-	})
-
-	t.Run("editor grant does not reach viewer", func(t *testing.T) {
-		actions, err := provider.ActionsForUser(ctx, mtIdentity("Viewer"))
-		require.NoError(t, err)
-		require.True(t, actions["dashboards:read"])
-		require.False(t, actions["dashboards:write"])
-	})
-
-	t.Run("excluded role does not inherit the grant", func(t *testing.T) {
-		viewerActions, err := provider.ActionsForUser(ctx, mtIdentity("Viewer"))
-		require.NoError(t, err)
-		require.True(t, viewerActions["excluded:read"])
-
-		editorActions, err := provider.ActionsForUser(ctx, mtIdentity("Editor"))
-		require.NoError(t, err)
-		require.False(t, editorActions["excluded:read"])
-	})
-
-	t.Run("grafana admin grant is not expanded to org roles", func(t *testing.T) {
-		adminActions, err := provider.ActionsForUser(ctx, mtIdentity("Admin"))
-		require.NoError(t, err)
-		require.False(t, adminActions["users:write"])
-
-		grafanaAdminActions, err := provider.ActionsForUser(ctx, mtIdentity("Grafana Admin"))
-		require.NoError(t, err)
-		require.True(t, grafanaAdminActions["users:write"])
-	})
-
-	t.Run("identity without id token claims gets empty set", func(t *testing.T) {
-		actions, err := provider.ActionsForUser(ctx, mtIdentity(""))
-		require.NoError(t, err)
-		require.Empty(t, actions)
-	})
+	return out
 }

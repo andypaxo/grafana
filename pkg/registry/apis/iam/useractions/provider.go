@@ -2,100 +2,147 @@ package useractions
 
 import (
 	"context"
+	"fmt"
+
+	claims "github.com/grafana/authlib/types"
 
 	"github.com/grafana/grafana/pkg/apimachinery/identity"
-	"github.com/grafana/grafana/pkg/infra/log"
+	"github.com/grafana/grafana/pkg/registry/apis/iam/common"
+	"github.com/grafana/grafana/pkg/registry/apis/iam/legacy"
 	"github.com/grafana/grafana/pkg/services/accesscontrol"
-	"github.com/grafana/grafana/pkg/services/accesscontrol/seeding"
-	"github.com/grafana/grafana/pkg/services/authn"
-	"github.com/grafana/grafana/pkg/services/user"
+	"github.com/grafana/grafana/pkg/services/apiserver/endpoints/request"
+	authzstore "github.com/grafana/grafana/pkg/services/authz/rbac/store"
 )
 
+// teamPageSize bounds each page of the team lookup, mirroring the authz
+// service's team resolution.
+const teamPageSize = 50
+
 // RolePermissionProvider resolves the RBAC actions granted to the calling
-// identity by its basic role (Viewer, Editor, Admin, None, plus Grafana
-// Admin in single-tenant) — never by per-user, team or managed-role
-// assignments.
+// identity.
 type RolePermissionProvider interface {
 	ActionsForUser(ctx context.Context, requester identity.Requester) (map[string]bool, error)
 }
 
-type userPermissionsProvider struct {
-	ac accesscontrol.Service
+// identityStore is the subset of the IAM legacy store needed to resolve the
+// teams an identity belongs to.
+type identityStore interface {
+	ListUserTeams(ctx context.Context, ns claims.NamespaceInfo, query legacy.ListUserTeamsQuery) (*legacy.ListUserTeamsResult, error)
 }
 
-// NewUserPermissionsProvider resolves role actions through the access control
-// service using a synthetic requester that carries only the caller's org,
-// basic role and server-admin flag. With no user id and no teams, both the
-// OSS and the enterprise implementation take the uncached path and return
-// only role-derived permissions, from wherever the running edition keeps
-// them: the in-memory role registry in OSS, the seeded (and admin-editable)
-// database roles under enterprise access-control enforcement. Used in
-// single-tenant mode.
-func NewUserPermissionsProvider(ac accesscontrol.Service) RolePermissionProvider {
-	return &userPermissionsProvider{ac: ac}
+// identifierStore resolves an identity's internal id and its basic role.
+type identifierStore interface {
+	GetUserIdentifiers(ctx context.Context, query authzstore.UserIdentifierQuery) (*authzstore.UserIdentifiers, error)
+	GetBasicRoles(ctx context.Context, ns claims.NamespaceInfo, query authzstore.BasicRoleQuery) (*authzstore.BasicRole, error)
 }
 
-func (p *userPermissionsProvider) ActionsForUser(ctx context.Context, requester identity.Requester) (map[string]bool, error) {
-	synthetic := &user.SignedInUser{
-		OrgID:          requester.GetOrgID(),
-		OrgRole:        requester.GetOrgRole(),
-		IsGrafanaAdmin: requester.GetIsGrafanaAdmin(),
+type sqlProvider struct {
+	actions        ActionStore
+	identifiers    identifierStore
+	identities     identityStore
+	actionResolver accesscontrol.ActionResolver
+}
+
+// NewSQLProvider resolves the caller's actions from the RBAC tables of the
+// tenant database: permissions granted through its basic role (including
+// Grafana Admin for server admins), roles assigned directly to the user, and
+// roles assigned to its teams. Everything is keyed off the request namespace,
+// so one implementation serves both single-tenant Grafana and the multi-tenant
+// IAM apiserver.
+//
+// actionResolver expands action set permissions (for example dashboards:view)
+// into the individual actions they stand for. It may be nil where no action
+// sets are registered, in which case action sets are reported as-is.
+func NewSQLProvider(actions ActionStore, identifiers identifierStore, identities identityStore, actionResolver accesscontrol.ActionResolver) RolePermissionProvider {
+	return &sqlProvider{
+		actions:        actions,
+		identifiers:    identifiers,
+		identities:     identities,
+		actionResolver: actionResolver,
+	}
+}
+
+func (p *sqlProvider) ActionsForUser(ctx context.Context, requester identity.Requester) (map[string]bool, error) {
+	// Only users and service accounts hold RBAC assignments. Anonymous
+	// identities and access policies get an empty set rather than an error,
+	// matching the legacy endpoint's behaviour for identities without
+	// permissions.
+	if !requester.IsIdentityType(claims.TypeUser, claims.TypeServiceAccount) {
+		return map[string]bool{}, nil
 	}
 
-	permissions, err := p.ac.GetUserPermissions(ctx, synthetic, accesscontrol.Options{})
+	// Take the namespace from the request rather than the identity: it is the
+	// tenant the caller asked about, it has already been checked by the
+	// namespace authorizer, and it is what the org id was resolved from.
+	ns, err := request.NamespaceInfoFrom(ctx, true)
 	if err != nil {
 		return nil, err
 	}
-	return accesscontrol.BuildPermissionsMap(permissions), nil
-}
 
-type registrationsProvider struct {
-	actionsByRole map[string]map[string]bool
-}
-
-// NewRegistrationsProvider resolves role actions from a set of fixed-role
-// registrations, expanding grants up the basic role hierarchy (a grant to
-// Viewer is also granted to Editor and Admin). Used in multi-tenant mode,
-// where no access control service runs and the registration list is the
-// service-independent source of truth. The basic role is read from the
-// verified ID token claims: the multi-tenant authenticator never sets
-// OrgRoles (GetOrgRole always returns None there), and identities without
-// an ID token (pure service and on-behalf-of calls) have no role and get an
-// empty permission set.
-func NewRegistrationsProvider(registrations []accesscontrol.RoleRegistration) RolePermissionProvider {
-	logger := log.New("iam.useractions")
-
-	desired := make(map[accesscontrol.SeedPermission]struct{})
-	for i := range registrations {
-		seeding.AppendDesiredPermissions(desired, logger, &registrations[i].Role, registrations[i].Grants, registrations[i].Exclude)
+	ids, err := p.identifiers.GetUserIdentifiers(ctx, authzstore.UserIdentifierQuery{UserUID: requester.GetIdentifier()})
+	if err != nil {
+		return nil, fmt.Errorf("could not resolve identity: %w", err)
 	}
 
-	actionsByRole := make(map[string]map[string]bool)
-	for sp := range desired {
-		if actionsByRole[sp.BuiltInRole] == nil {
-			actionsByRole[sp.BuiltInRole] = make(map[string]bool)
+	basicRole, err := p.identifiers.GetBasicRoles(ctx, ns, authzstore.BasicRoleQuery{UserID: ids.ID})
+	if err != nil {
+		return nil, fmt.Errorf("could not resolve basic role: %w", err)
+	}
+
+	teamIDs, err := p.userTeams(ctx, ns, ids.UID)
+	if err != nil {
+		return nil, err
+	}
+
+	actions, err := p.actions.GetUserActions(ctx, ns, ActionsQuery{
+		UserID:        ids.ID,
+		TeamIDs:       teamIDs,
+		Role:          basicRole.Role,
+		IsServerAdmin: basicRole.IsAdmin,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("could not resolve actions: %w", err)
+	}
+
+	return p.buildActionMap(actions), nil
+}
+
+func (p *sqlProvider) userTeams(ctx context.Context, ns claims.NamespaceInfo, userUID string) ([]int64, error) {
+	var teamIDs []int64
+	query := legacy.ListUserTeamsQuery{
+		UserUID:    userUID,
+		Pagination: common.Pagination{Limit: teamPageSize},
+	}
+
+	for {
+		teams, err := p.identities.ListUserTeams(ctx, ns, query)
+		if err != nil {
+			return nil, fmt.Errorf("could not resolve teams: %w", err)
 		}
-		actionsByRole[sp.BuiltInRole][sp.Action] = true
+		for _, team := range teams.Items {
+			teamIDs = append(teamIDs, team.ID)
+		}
+		if teams.Continue == 0 {
+			return teamIDs, nil
+		}
+		query.Pagination.Continue = teams.Continue
 	}
-
-	return &registrationsProvider{actionsByRole: actionsByRole}
 }
 
-func (p *registrationsProvider) ActionsForUser(_ context.Context, requester identity.Requester) (map[string]bool, error) {
-	actions := make(map[string]bool)
-	for action := range p.actionsByRole[roleFromIDTokenClaims(requester)] {
-		actions[action] = true
+// buildActionMap turns the action rows into the action -> true map the
+// endpoint returns, expanding action sets when a resolver is configured.
+func (p *sqlProvider) buildActionMap(actions []string) map[string]bool {
+	if p.actionResolver == nil {
+		out := make(map[string]bool, len(actions))
+		for _, action := range actions {
+			out[action] = true
+		}
+		return out
 	}
-	return actions, nil
-}
 
-// roleFromIDTokenClaims extracts the basic role from the verified ID token
-// claims attached to the identity by the multi-tenant authenticator. Returns
-// an empty string when the identity carries no ID token claims.
-func roleFromIDTokenClaims(requester identity.Requester) string {
-	ident, ok := requester.(*authn.Identity)
-	if !ok || ident.IDTokenClaims == nil {
-		return ""
+	permissions := make([]accesscontrol.Permission, 0, len(actions))
+	for _, action := range actions {
+		permissions = append(permissions, accesscontrol.Permission{Action: action})
 	}
-	return ident.IDTokenClaims.Rest.Role
+	return accesscontrol.BuildPermissionsMap(p.actionResolver.ExpandActionSets(permissions))
 }

@@ -54,6 +54,7 @@ import (
 	"github.com/grafana/grafana/pkg/services/apiserver/auth/authorizer/storewrapper"
 	"github.com/grafana/grafana/pkg/services/apiserver/builder"
 	"github.com/grafana/grafana/pkg/services/apiserver/versionpolicy"
+	authzstore "github.com/grafana/grafana/pkg/services/authz/rbac/store"
 	"github.com/grafana/grafana/pkg/services/authz/zanzana"
 	"github.com/grafana/grafana/pkg/services/featuremgmt"
 	"github.com/grafana/grafana/pkg/services/org"
@@ -77,7 +78,7 @@ func RegisterAPIService(
 	ssoService ssosettings.Service,
 	sql db.DB,
 	ac accesscontrol.AccessControl,
-	acService accesscontrol.Service,
+	actionResolver accesscontrol.ActionResolver,
 	accessClient types.AccessClient,
 	zClient zanzana.Client,
 	reg prometheus.Registerer,
@@ -187,8 +188,13 @@ func RegisterAPIService(
 			display.NewLegacyDisplayProvider(store),   // Do legacy first
 			display.NewSearchDisplayProvider(unified), // then use search index
 		),
-		userActionsHandler: useractions.NewHandler(useractions.NewUserPermissionsProvider(acService)),
-		ofClient:           openfeature.NewDefaultClient(),
+		userActionsHandler: useractions.NewHandler(useractions.NewSQLProvider(
+			useractions.NewSQLActionStore(dbProvider, tracing),
+			authzstore.NewStore(dbProvider, tracing),
+			store,
+			actionResolver,
+		)),
+		ofClient: openfeature.NewDefaultClient(),
 	}
 	builder.userSearchHandler = user.NewSearchHandler(tracing, builder.userSearchClient, cfg, accessClient)
 	builder.teamSearchHandler = team.NewSearchHandler(tracing, builder.teamSearchClient, accessClient)
@@ -212,7 +218,6 @@ func NewAPIService(
 	tracingService tracing.Tracer,
 	mappers *resourcepermission.MappersRegistry,
 	settingService settingsvc.Service,
-	rolePermissions useractions.RolePermissionProvider,
 ) *IdentityAccessManagementAPIBuilder {
 	store := legacy.NewLegacySQLStores(dbProvider)
 	resourcePermissionsStorage := resourcepermission.ProvideStorageBackend(dbProvider, mappers)
@@ -241,7 +246,14 @@ func NewAPIService(
 			display.NewLegacyDisplayProvider(store),
 			// TODO: include the search client here
 		),
-		userActionsHandler:         useractions.NewHandler(rolePermissions),
+		// No action resolver: action sets are registered by the resource
+		// permission services, which do not run in multi-tenant mode.
+		userActionsHandler: useractions.NewHandler(useractions.NewSQLProvider(
+			useractions.NewSQLActionStore(dbProvider, tracingService),
+			authzstore.NewStore(dbProvider, tracingService),
+			store,
+			nil,
+		)),
 		tracing:                    tracingService,
 		resourcePermissionsStorage: resourcePermissionsStorage,
 		mappers:                    mappers,
