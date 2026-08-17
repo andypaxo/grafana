@@ -1176,8 +1176,8 @@
         "with-causes": ""
       },
       "failedWith": "Ошибка {{-config}} со статусом {{status}}: {{-message}}",
-      "time-interval-in-use": "Невозможно удалить временной интервал, так как он используется либо политками уведомления либо правилами оповещения.",
-      "time-interval-name-exists": "Временной интервал с таким именем уже существует. Используйте другое имя или переименуйте существующий интервал."
+      "time-interval-in-use": "",
+      "time-interval-name-exists": ""
     },
     "evaluate-every-validation-options": {
       "message": {
@@ -3333,8 +3333,12 @@
         "picker-label": "",
         "picker-placeholder": "",
         "save-disabled-no-selection": "",
+        "save-disabled-staged-config": "",
         "save-error": "",
         "save-success": "",
+        "staged-conflict-active-title": "",
+        "staged-conflict-body": "",
+        "staged-conflict-title": "",
         "title": ""
       },
       "import": {
@@ -3351,9 +3355,21 @@
         "inhibition-equal": "",
         "loading": "",
         "no-matchers": "",
+        "no-write-permission": "",
         "parse-error-body": "",
         "parse-error-title": "",
         "resources": "",
+        "revert": {
+          "body": "",
+          "confirm": "",
+          "error-title": "",
+          "reassure-live": "",
+          "reassure-promoted": "",
+          "reassure-reimport": "",
+          "success": "",
+          "title": ""
+        },
+        "revert-button": "",
         "section": {
           "contact-points": "",
           "inhibition-rules": "",
@@ -3364,6 +3380,8 @@
         "staged-badge": "",
         "staged-description": "",
         "staged-title": "",
+        "sync-managed-description": "",
+        "synced-badge": "",
         "view": "",
         "policy-tree-routes_one": "",
         "policy-tree-routes_few": "",
@@ -3659,7 +3677,7 @@
     },
     "time-interval-form": {
       "description-unique-time-interval": "Уникальное имя для временного интервала.",
-      "error-save-time-interval": "Не удалось сохранить временной интервал",
+      "error-save-time-interval": "",
       "text-loading-time-interval": "Загрузка временного интервала",
       "title-no-matching-time-interval-found": "Соответствующий временной интервал не найден"
     },
@@ -11926,6 +11944,7 @@
       "no-details": "Отсутствуют поля для отображения.",
       "open-assistant": "Объяснить строку журнала в Assistant",
       "pin-line": "Закрепить журнал",
+      "prettify": "",
       "remove-displayed-field": "Удалить поле",
       "remove-log": "Удалить журнал",
       "scroll-to-logline": "Прокрутить до строки журнала",
@@ -12966,6 +12985,23 @@
     }
   },
   "notebook": {
+    "add-block": {
+      "code": "",
+      "heading": "",
+      "label": "",
+      "paragraph": "",
+      "prompt": "",
+      "visualization": "",
+      "visualization-placeholder": ""
+    },
+    "cell": {
+      "delete": "",
+      "delete-confirm-text": "",
+      "delete-confirm-title": "",
+      "delete-confirm-yes": "",
+      "drag-handle": "",
+      "duplicate": ""
+    },
     "errors": {
       "entity": "",
       "failed-to-load": "",
@@ -13007,8 +13043,8 @@
     },
     "view": {
       "copy-link": "",
-      "edit-mode": "",
-      "editing": ""
+      "mode-edit": "",
+      "mode-view": ""
     }
   },
   "notifications": {
@@ -14591,6 +14627,12 @@
     "shared": {
       "branch-description": "Ветвь, используемая для подготовки",
       "branch-label": "Ветвь",
+      "commit-author-email-description": "",
+      "commit-author-email-label": "",
+      "commit-author-email-placeholder": "",
+      "commit-author-name-description": "",
+      "commit-author-name-label": "",
+      "commit-author-name-placeholder": "",
       "commit-signer-email-description": "",
       "commit-signer-email-label": "",
       "commit-signer-email-placeholder": "",
